@@ -1,0 +1,282 @@
+---
+title: "CUTe-3 : Prediction on bankruptcy"
+author: "Group 10"
+date: "August 30, 2017"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Preprocessing 
+### Removing the Global Environment variables
+```{r}
+rm(list = ls(all = TRUE))
+```
+### Packages used
+```{r}
+library(DMwR)
+library(caret)
+library(corrplot)
+library(randomForest)
+library(sqldf)
+library(reshape2)
+library(C50)
+```
+### Setting the working directory and reading the bankruptcy data
+```{r}
+#setwd("D:/big data insofe/CUTES/PredictionOnBankruptcy.Rmd")
+setwd("D:\\big data insofe\\CUTES\\Datasets_CSE7305c_CUTe")
+
+list.files()
+bankruptcy.data = read.csv("train.csv", header = TRUE)
+bankruptcy.copy = bankruptcy.data
+```
+### Understanding the type of variables present in the dataset.
+```{r}
+str(bankruptcy.data)
+```
+### Understanding the central tendencies of each variable using summary() method
+```{r}
+summary(bankruptcy.data)
+
+summary(bankruptcy.copy)
+sum(is.na(bankruptcy.data))
+bankruptcy.data$target
+prop.table(table((bankruptcy.data$target)))
+```
+### Removing Attr37 since it has 43.8% NAs
+```{r}
+sum(is.na(bankruptcy.data$Attr37))/nrow(bankruptcy.data)
+bankruptcy.data$Attr37 = NULL
+```
+### Removing Attr14 since the correlation between Attr7 and Attr14 is equal to 1.
+```{r}
+cor.value = cor(bankruptcy.data$Attr7, bankruptcy.data$Attr14, use = "complete.obs")
+print(cor.value)
+rm(cor.value)
+# Attr14 is same as Attr7 for 43000/43004 rows.
+nrow(bankruptcy.data[which(bankruptcy.data$Attr7 != bankruptcy.data$Attr14),])
+bankruptcy.data$Attr14 = NULL
+```
+### Removing the rows having more than 25% NAs
+### Investigation on the NA values
+```{r}
+row.to.remove = manyNAs(bankruptcy.data, 0.25)
+bankruptcy.data = bankruptcy.data[!((rownames(bankruptcy.data) %in% row.to.remove) & bankruptcy.data$target == "No"),]
+rm(row.to.remove)
+```
+### Imputing the values for Attr60 and Attr45 as 0 when the inventory is 0
+```{r}
+bankruptcy.data$Attr60 = ifelse(is.na(bankruptcy.data$Attr60) & bankruptcy.data$Attr20 == 0,0, bankruptcy.data$Attr60)
+bankruptcy.data$Attr45 = ifelse(is.na(bankruptcy.data$Attr45) & bankruptcy.data$Attr20 == 0,0, bankruptcy.data$Attr45)
+```
+### Imputing the values for Attr28, Attr53, Attr54, Attr64
+```{r}
+bankruptcy.data$Attr28 = ifelse(is.na(bankruptcy.data$Attr28),bankruptcy.data$Attr3 , bankruptcy.data$Attr28)
+bankruptcy.data$Attr53 = ifelse(is.na(bankruptcy.data$Attr53), bankruptcy.data$Attr10 , bankruptcy.data$Attr53)
+bankruptcy.data$Attr54 = ifelse(is.na(bankruptcy.data$Attr54), bankruptcy.data$Attr38, bankruptcy.data$Attr54)
+bankruptcy.data$Attr64 = ifelse(is.na(bankruptcy.data$Attr64),bankruptcy.data$Attr9, bankruptcy.data$Attr64)
+```
+
+
+### Treating the outliers
+```{r}
+#Function to identify the outliers outside the +/- 1.5 times lower and upper IQR
+removeOutlier = function(input_dataset)
+{
+  na1 = sum(is.na(input_dataset))
+  m1 = mean(input_dataset, na.rm = T)
+  par(mfrow=c(2, 2), oma=c(0,0,3,0))
+  boxplot(input_dataset, main="With outliers")
+  hist(input_dataset, main="With outliers", xlab=NA, ylab=NA)
+  outlier = boxplot.stats(input_dataset, coef = 1.5)$out
+  mo = mean(outlier)
+
+  # Wincerising
+    # Find the wiscour points
+    #lower_iqr = boxplot(input_dataset)$stats[1,1]*2
+    #upper_iqr = boxplot(input_dataset)$stats[5,1]*2
+    
+    # replace outliers with these viscour points
+    #input_dataset = ifelse(input_dataset <= lower_iqr, lower_iqr, ifelse(input_dataset >= upper_iqr, upper_iqr, input_dataset))
+    
+  input_dataset = ifelse(input_dataset %in% outlier, NA, input_dataset)
+  boxplot(input_dataset, main="Without outliers")
+  hist(input_dataset, main="Without outliers", xlab=NA, ylab=NA)
+  title("Outlier Check", outer=TRUE)
+  na2 = sum(is.na(input_dataset))
+  cat("Outliers identified:", na2 - na1, "\n")
+  cat("Propotion (%) of outliers:", round((na2 - na1) / sum(!is.na(input_dataset))*100, 1), "\n")
+  cat("Mean of the outliers:", round(mo, 2), "\n")
+  m2 = mean(input_dataset, na.rm = T)
+  cat("Mean without removing outliers:", round(m1, 2), "\n")
+  cat("Mean if we remove outliers:", round(m2, 2), "\n\n\n")
+
+  return(input_dataset)
+}
+
+for (i in 1:(ncol(bankruptcy.data)-1)) # except Target field
+{
+
+  cat("Outlier Treamment for: Attr", i, "\n")
+  cat("-----------------------------\n")
+  bankruptcy.data[,i] = removeOutlier(bankruptcy.data[,i])
+  summary(bankruptcy.data[,i])
+  summary(bankruptcy.copy[,i])
+}
+```
+### Central Imputation o the dataset
+```{r}
+bankruptcy.data = centralImputation(bankruptcy.data)
+```
+# Find multicollinearity
+```{r}
+corr_new = cor(bankruptcy.data[,setdiff(names(bankruptcy.data), "target")], use = "complete.obs")
+corr_new[lower.tri(corr_new)] <- NA
+
+data_corr = melt(corr_new)
+data_corr = sqldf('select * from data_corr where value <> \'NA\' and (value > 0.9 or value < -0.9) and Var1 <> Var2 order by Var1')
+
+sqldf('select distinct Var2 from data_corr order by Var2')
+
+bankruptcy.data = bankruptcy.data[,setdiff(names(bankruptcy.data), 
+                                              c("Attr10","Attr11","Attr17","Attr18","Attr23",
+                                                "Attr26","Attr51","Attr52","Attr54","Attr7"))]
+```
+
+### Splitting the data into Train [70%], and Test [30%]
+```{r}
+set.seed(123)
+train.rows = createDataPartition(bankruptcy.data$target, p = 0.7, list = FALSE)  
+train.data = bankruptcy.data[train.rows,]
+test.data = bankruptcy.data[-train.rows,]
+rm(train.rows)
+```
+
+### Verifying the proportion of the target variable in train and test dataset.
+```{r}
+prop.table(table(bankruptcy.data$target))
+prop.table(table(train.data$target))
+prop.table(table(test.data$target))
+
+```
+## Splitting the training to compensate for class imbalance
+```{r}
+# Separate the records with Yes and No classes
+train.data.No = train.data[which(train.data$target == "No"),]
+train.data.Yes = train.data[which(train.data$target == "Yes"),]
+
+# From the No class records, we will discard 93% of data and keep only 7%. 
+# This ratio worked best among the other tried numbers
+sample.rows.model = sample(1:nrow(train.data.No), size = nrow(train.data.No)*.07)
+train.data.No.Sample = train.data.No[sample.rows.model,]
+
+# Then combine the subset of No and all of Yes records which will have a class balance of 3:1
+bank.combined.sample.data = rbind(train.data.No.Sample, train.data.Yes)
+prop.table(table(bank.combined.sample.data$target))
+
+# Next, split this new balanced dataset into train and test
+# Decision Tree on Processed Data but with all the fields
+set.seed(123)
+train.rows = createDataPartition(bank.combined.sample.data$target, p = 0.7, list = FALSE)  
+train.data.balanced = bank.combined.sample.data[train.rows,]
+test.data.balanced = bank.combined.sample.data[-train.rows,]
+rm(train.rows)
+
+prop.table(table(train.data.balanced$target))
+prop.table(table(test.data.balanced$target))
+```
+# Decision Tree Modeling
+
+```{r}
+# Build the model using this new training dataset
+C50.dt.model = C5.0(target ~ ., train.data.balanced)
+summary(C50.dt.model)
+
+# Test model on the new train dataset
+prediction <- predict(C50.dt.model, train.data.balanced)
+confusionMatrix(prediction, train.data.balanced$target, positive = 'Yes')
+
+# Test model on this new test dataset
+prediction <- predict(C50.dt.model, test.data.balanced)
+confusionMatrix(prediction, test.data.balanced$target, positive = 'Yes')
+
+# Test this model on the real test data which was split in the very initial phase
+prediction <- predict(C50.dt.model, test.data)
+confusionMatrix(prediction, test.data$target, positive = 'Yes')
+```
+
+## H2O Framework
+### Load the H2O R package and start an local H2O cluster
+```{r}
+library(h2o)
+```
+### Starts H2O using localhost IP, port 54321, all CPUs, and 2g of memory
+```{r}
+h2o.init(ip = "localhost", port = 54321, nthreads= -1, max_mem_size = "2G")
+```
+# To check the status and health of the H2O cluster, use
+```{r}
+h2o.clusterInfo()
+```
+### Import local R train and test data frame to the H2O cloud
+```{r}
+train.hex = as.h2o(x = train.data.balanced, destination_frame = "train.hex")
+test.balanced.hex = as.h2o(x = test.data.balanced, destination_frame = "test.balanced.hex")
+test.hex = as.h2o(x = test.data, destination_frame = "test.hex")
+```
+
+### Running randomForest model in h20 framework
+```{r}
+rf1 = h2o.randomForest(
+  training_frame = train.hex,
+  validation_frame = test.balanced.hex,
+  x = 1:52,
+  y = 53,
+  ntrees = 100,
+  max_depth = 19,
+  mtries = 30,
+  model_id = "rf1.id",
+  stopping_rounds = 5,
+  stopping_tolerance = 0.0001,
+  score_each_iteration = TRUE,
+  seed = 12345
+)
+print(rf1)
+```
+### Predicting on the test data
+```{r}
+predictions = h2o.predict(object = rf1, newdata = test.hex)
+predictions.r = as.data.frame(predictions)
+str(predictions.r)
+```
+### Confusion Matrix
+```{r}
+confusionMatrix(predictions.r$predict, test.data$target, positive = "Yes")
+```
+### 
+```{r}
+print(rf1)
+plot(rf1)
+```
+### Tuning randomforest model using h20 grid
+```{r}
+# #Prepare the parameters for the for H2O glm grid search
+# grid_space = list(ntrees = c(200), max_depth = c(10), mtries = c(7))
+# rf.grid.model = h2o.grid("randomForest",
+#                          hyper_params = grid_space,
+#                          grid_id = "grid_randomforest2.hex",
+#                          hyper_params = grid_space,
+#                          x =setdiff(names(train.hex), "target"),
+#                          y = "target",
+#                          training_frame = train.hex,
+#                          seed = 125)
+```
+
+
+
